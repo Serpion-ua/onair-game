@@ -1,5 +1,6 @@
 package com.onairentertainment
 
+import akka.NotUsed
 import akka.actor.{ActorRef, ActorSystem, PoisonPill, Props, Status}
 import akka.http.scaladsl.model.ws.{Message, TextMessage}
 import akka.stream.scaladsl.{Flow, Sink, Source}
@@ -14,9 +15,17 @@ class WsRouter()(implicit system: ActorSystem, mat: Materializer) {
     new GameLogic(System.nanoTime() ^ System.currentTimeMillis(), Config.config.gameLogic.maxNumberValue)
 
   def websocketFlow(gameLogic: GameLogic = defaultGameLogic): Flow[Message, Message, Any] = {
-
-    val gameActor: ActorRef =
-      system.actorOf(Props(new GameActor(gameLogic)))
+    val (gameActor: ActorRef, source: Source[TextMessage.Strict, NotUsed]) =
+      Source.actorRef[game_response](
+        completionMatcher = PartialFunction.empty,
+        failureMatcher = PartialFunction.empty,
+        bufferSize = 16,
+        overflowStrategy = OverflowStrategy.fail)
+        .map(msg => TextMessage(JsonUtils.encodeJson(msg)))
+        .mapMaterializedValue { destRef =>
+          system.actorOf(Props(new GameActor(gameLogic, destRef)))
+        }
+        .preMaterialize()
 
     val sink =
       Flow[Message]
@@ -34,21 +43,6 @@ class WsRouter()(implicit system: ActorSystem, mat: Materializer) {
           gameActor,
           PoisonPill,
           t => Status.Failure(t)))
-
-    val sourceActor: Source[game_response, ActorRef] =
-      Source.actorRef[game_response](
-        completionMatcher = PartialFunction.empty,
-        failureMatcher = PartialFunction.empty,
-        bufferSize = 16,
-        overflowStrategy = OverflowStrategy.fail)
-
-    val source: Source[Message, ActorRef] =
-      sourceActor
-        .map(msg => TextMessage(JsonUtils.encodeJson(msg)))
-        .mapMaterializedValue { destRef =>
-          gameActor ! destRef
-          destRef
-        }
 
     Flow.fromSinkAndSourceCoupled(sink, source)
   }
